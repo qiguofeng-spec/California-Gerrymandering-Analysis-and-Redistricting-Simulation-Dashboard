@@ -1,0 +1,218 @@
+---
+title: "California Gerrymandering Dashboard"
+format:
+  dashboard:
+    orientation: rows
+---
+
+```{r}
+#| message: false
+library(tidyverse)
+library(sf)
+library(scales)
+```
+
+
+```{r}
+#| message: false
+# Data Products
+# Read inputs and build district-level tables
+# 2024 observed: aggregate cleaned precinct results to 2024 districts
+
+g24 <- read_csv("data/g24-clean.csv")
+
+g24_district <- g24 |>
+group_by(CDDIST) |>
+summarize(
+dem_01 = sum(CNGDEM01, na.rm = TRUE),
+dem_02 = sum(CNGDEM02, na.rm = TRUE),
+rep_01 = sum(CNGREP01, na.rm = TRUE),
+rep_02 = sum(CNGREP02, na.rm = TRUE),
+.groups = "drop"
+) |>
+mutate(
+d_votes = dem_01 + dem_02,
+r_votes = rep_01 + rep_02,
+d_vs_r = dem_01 > 0 & rep_01 > 0
+) |>
+filter(d_vs_r) |>
+mutate(
+dist_str = str_pad(as.integer(CDDIST), 2, pad = "0"),
+prop_rep = r_votes / (d_votes + r_votes),
+winner = case_when(
+d_votes > r_votes ~ "Dem",
+r_votes > d_votes ~ "Rep",
+TRUE ~ "Tie/NA"
+)
+)
+
+# AB 604 rerun (Approach B): already district-level
+
+rerun <- read_csv("data/g24-rerun-approachB.csv") |>
+mutate(
+CDDIST = as.integer(new_district),
+dist_str = str_pad(CDDIST, 2, pad = "0"),
+prop_rep = r_votes / (d_votes + r_votes),
+winner = case_when(
+d_votes > r_votes ~ "Dem",
+r_votes > d_votes ~ "Rep",
+TRUE ~ "Tie/NA"
+)
+)
+```
+
+
+```{r}
+# Compute required summary statistics
+#| message: false
+
+n_wasted <- function(by, against) {
+out <- rep(0, length(by))
+w_threshold <- floor((by + against) / 2) + 1
+out[by > against] <- by[by > against] - w_threshold[by > against]
+out[by <= against] <- by[by <= against]
+out
+}
+
+metrics_table <- function(df, label) {
+dem_seats <- sum(df$d_votes > df$r_votes, na.rm = TRUE)
+total_seats <- sum(!is.na(df$d_votes) & !is.na(df$r_votes))
+
+mean_p <- mean(df$prop_rep, na.rm = TRUE)
+med_p <- median(df$prop_rep, na.rm = TRUE)
+mm <- mean_p - med_p
+
+d_w <- n_wasted(df$d_votes, df$r_votes)
+r_w <- n_wasted(df$r_votes, df$d_votes)
+total_d <- sum(df$d_votes, na.rm = TRUE)
+total_r <- sum(df$r_votes, na.rm = TRUE)
+eg <- (sum(d_w, na.rm = TRUE) - sum(r_w, na.rm = TRUE)) / (total_d + total_r)
+
+tibble(
+Scenario = label,
+`Dem seats` = paste0(dem_seats, " / ", total_seats),
+`Dem seat share` = percent(dem_seats / total_seats, accuracy = 0.1),
+`Mean–median (R share)` = round(mm, 4),
+`Efficiency gap (D−R wasted / total)` = round(eg, 4)
+)
+}
+
+metrics_all <- bind_rows(
+metrics_table(g24_district, "2024 Observed (D vs R only)"),
+metrics_table(rerun, "AB 604 Rerun (Approach B)")
+)
+```
+
+```{r}
+#| message: false
+
+# 2024 Congressional Districts (CA only, CD119)
+
+cd2024 <- read_sf("data/shapefiles/tl_2024_06_cd119.shp") |>
+st_transform(3310) |>
+mutate(
+dist_str = as.character(CD119FP),
+dist_str = str_pad(as.integer(dist_str), 2, pad = "0")
+)
+
+# AB 604 districts
+
+ab604 <- read_sf("data/shapefiles/AB604.shp") |>
+st_transform(3310) |>
+mutate(
+dist_str = as.character(DISTRICT),
+dist_str = str_pad(as.integer(dist_str), 2, pad = "0")
+)
+
+map_2024 <- cd2024 |>
+left_join(
+g24_district |> select(dist_str, d_votes, r_votes, prop_rep, winner),
+by = "dist_str"
+)
+
+map_rerun <- ab604 |>
+left_join(
+rerun |> select(dist_str, d_votes, r_votes, prop_rep, winner),
+by = "dist_str"
+)
+
+```
+
+## Row {height="60%"}
+
+### Column {width="50%" title="2024 districts (CD119) — observed"}
+
+#### Row {height="70%"}
+
+```{r}
+#| fig-height: 7
+ggplot(map_2024) +
+  geom_sf(aes(fill = winner), linewidth = 0.1) +
+  labs(fill = "Winner") +
+  theme_void()
+```
+
+#### Row {height="30%" title= metric}
+
+```{r}
+metrics_all |>
+filter(str_detect(Scenario, "2024"))
+```
+
+### Column {width="50%" title="AB 604 districts — rerun (Approach B)"}
+#### Row {height="70%"}
+
+```{r}
+#| fig-height: 7
+ggplot(map_rerun) +
+geom_sf(aes(fill = winner), linewidth = 0.1) +
+labs(fill = "Winner") +
+theme_void()
+```
+
+#### Row {height="30%" title= metric}
+
+```{r}
+metrics_all |>
+filter(str_detect(Scenario, "AB 604") | str_detect(Scenario, "Rerun") | str_detect(Scenario, "Approach B"))
+```
+
+## Row {height="60%"}
+
+### Methodology {.tabset}
+
+#### Data source
+This project uses two sources:
+
+- **California Statewide Database (SWDB)** for 2024 election results and precinct/block conversion resources:  
+  https://statewidedatabase.org/d20/g24.html  
+  This includes the 2024 SOV vote files (e.g., SV precinct and SR precinct exports) and the supporting geography/conversion files used in Approach B (e.g., SR-precinct-to-block mapping and related fields such as `PCTSRPREC`).  
+  The SR precinct boundary shapefile used in Approach A (`srprec_state_g24_v01_shp`) also comes from SWDB.
+
+- **California Assembly Elections and Redistricting (AB 604)** for the new congressional district plan and related GIS/equivalency downloads:  
+  https://aelc.assembly.ca.gov/proposed-congressional-map  
+  This provides the AB 604 district shapefile and the block-to-district equivalency needed to attach census blocks to AB 604 districts in the rerun.
+
+#### Data cleaning
+- The 2024 precinct-level vote file was reduced to the congressional contests of interest and key identifiers.
+- Rows with `CDDIST == 0` were removed because they represent non-district aggregates / artifacts rather than valid district assignments.
+- District-level totals were computed as:
+  - `d_votes = CNGDEM01 + CNGDEM02`
+  - `r_votes = CNGREP01 + CNGREP02`
+- For the **observed 2024** baseline metrics, districts were restricted to cases with both major-party presence:
+  - `dem_01 > 0` and `rep_01 > 0`
+
+#### Estimation process
+Two district plans are compared:
+
+- **Observed 2024 (CD119):** Votes are summed within the 2024 congressional district codes in the precinct results, producing district-level totals and winners.
+- **Hypothetical rerun under AB 604 (Approach B):**
+  1. Start from SR-precinct vote totals.
+  2. Allocate each SR-precinct’s votes to census blocks proportionally using the registered-voter share (`PCTSRPREC`).
+  3. Map blocks to AB 604 districts using the block-to-district equivalency file.
+  4. Aggregate block-allocated votes up to AB 604 districts to obtain rerun district totals and winners.
+
+#### Caveats
+- **Single-number diagnostics are not proof.** Mean–median and efficiency gap are descriptive indicators; they can be influenced by political geography, turnout differences, and the underlying distribution of partisans.
+- **Comparability note:** The observed 2024 metrics are computed only on districts passing the “D vs R” filter (`dem_01 > 0 & rep_01 > 0`), while the AB 604 rerun totals come from the block-allocation aggregation. This difference in inclusion rules can affect strict apples-to-apples comparisons.
+- **Allocation error:** Approach B assumes votes can be apportioned to blocks according to registered-voter proportions; this introduces modeling error when turnout or preferences vary within a precinct.
