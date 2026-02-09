@@ -1,0 +1,188 @@
+---
+title: Data Cleaning
+format: typst
+---
+
+### 2024 general election data by SV precinct
+
+```{r}
+#| message: false
+#| eval: false
+
+## load 2024 general election vote counts by precinct
+library(tidyverse)
+g24raw <- read_csv("data/g24_sov_by_g24_svprec.csv", na = c("", "NA", "***"))
+
+## focus on important cols
+g24 <- g24raw |>
+  select(COUNTY, FIPS, SVPREC, CDDIST,
+         CNGDEM01, CNGDEM02, CNGIND01, CNGREP01, CNGREP02)
+
+## isolate all rows with a congressional district of 0
+g24_cddist0 <- g24 |>
+  filter(CDDIST == 0)
+# They appear to be aggregations of other rows and have precinct names that
+#  start with `SOV` or end in `TOT`.
+
+## remove those rows
+g24 <- g24 |>
+  filter(CDDIST != 0)
+
+## inspect rows with NA for counts
+all_na <- g24 |>
+  filter(is.na(CNGDEM01))
+all_na
+# they seem innocuous. i'll retain them.
+
+## check for replicates
+g24 |>
+  count(SVPREC) |>
+  ggplot(aes(x = n)) +
+  geom_bar()
+# yes, there are replicates!
+
+# find the worst offender
+g24 |>
+  count(SVPREC) |>
+  arrange(desc(n))
+
+# look at it
+g24 |>
+  filter(SVPREC == "01")
+# zomg, SVPREC isn't a unique id. each county does their own numbering.
+# election data is very de-centralized / unsystematic.
+
+## check that County x SVPREV can serve as a unique id
+g24 |>
+  group_by(COUNTY, SVPREC) |>
+  summarize(n = n()) |>
+  arrange(desc(n))
+# thank god
+
+write_csv(g24, "data/g24-clean.csv")
+```
+
+### Re-running the 2024 election results under the new district map
+
+#### Approach A
+
+Load and clean voting data by SR Precinct.
+
+```{r}
+#| eval: false
+library(tidyverse)
+sr <- read_csv("data/state_g24_sov_data_by_g24_srprec.csv", na = c("", "NA", "***"))
+
+sr <- sr |>
+  select(COUNTY, FIPS, SRPREC, SRPREC_KEY, CDDIST, CNGDEM01, 
+         CNGDEM02, CNGIND01, CNGREP01, CNGREP02) |>
+  filter(CDDIST != 0)
+```
+
+Load SR precinct shapefiles and append voting data.
+
+```{r}
+#| eval: false
+library(sf)
+sr_shp <- read_sf("data/shapefiles/srprec_state_g24_v01_shp.shp")
+
+# correct errors in geometries
+sr_shp <- sr_shp |>
+  st_transform(3310) |>          # switch to equal area projection first
+  st_set_precision(1) |>         # snap points to 1 m grid
+  st_make_valid() |>             # fix self-intersections/bow-ties
+  st_collection_extract("POLYGON")
+
+sr_shp <- sr_shp |>
+  left_join(sr, by = "SRPREC_KEY")
+```
+
+Load new district shapefiles and perform interpolation.
+
+```{r}
+#| eval: false
+d25 <- read_sf("data/shapefiles/AB604.shp") |>
+  st_transform(crs = 3310)
+
+approach_A <- sr_shp[c("CNGDEM01", "CNGDEM02", "CNGREP01", "CNGREP02")] |>
+  st_interpolate_aw(d25, extensive = TRUE, na.rm = TRUE) 
+```
+
+```{r}
+#| eval: false
+approach_A$dist <- d25$DISTRICT
+
+approach_A <- approach_A |>
+  mutate(d_votes = CNGDEM01 + CNGDEM02,
+         r_votes = CNGREP01 + CNGREP02)
+
+write_csv(approach_A, "data/g24-rerun-approachA.csv")
+```
+
+
+#### Approach B
+
+Load and clean voting data by SR Precinct.
+
+```{r}
+#| eval: false
+library(tidyverse)
+sr <- read_csv("data/state_g24_sov_data_by_g24_srprec.csv", na = c("", "NA", "***"))
+
+sr <- sr |>
+  select(COUNTY, FIPS, SRPREC, SRPREC_KEY, CDDIST, CNGDEM01, 
+         CNGDEM02, CNGIND01, CNGREP01, CNGREP02) |>
+  filter(CDDIST != 0)
+```
+
+Load block file and join with vote data by SR precinct.
+
+`BLKTOTREG`: The total number of registered voters on that block.
+`PCTSRPREC`: The proportion of total registered voters in the precinct that live on that block.
+
+```{r}
+#| eval: false
+blk <- read_csv("data/state_g24_sr_blk_map.csv")
+
+blk <- blk |>
+  left_join(sr)
+```
+
+Allocation precinct votes proportionally to (fractional) blocks based on proportion of registered voters.
+
+```{r}
+#| eval: false
+blk <- blk |>
+  mutate(dem1 = CNGDEM01 * PCTSRPREC / 100,
+         dem2 = CNGDEM02 * PCTSRPREC / 100,
+         rep1 = CNGREP01 * PCTSRPREC / 100,
+         rep2 = CNGREP02 * PCTSRPREC / 100,)
+```
+
+Load block to AB 604 district correspondence and attach new districts to voting data.
+
+```{r}
+#| eval: false
+blk_cd <- read_csv("data/cd25.csv", col_names = c("block_key", "new_district"))
+
+blk <- blk |>
+  left_join(blk_cd, by = join_by("BLOCK_KEY" == "block_key"))
+```
+
+Aggregate votes at new district level.
+
+```{r}
+#| eval: false
+approach_B <- blk |>
+  group_by(new_district) |>
+  summarize(dem1 = sum(dem1, na.rm = TRUE),
+            dem2 = sum(dem2, na.rm = TRUE),
+            rep1 = sum(rep1, na.rm = TRUE),
+            rep2 = sum(rep2, na.rm = TRUE)) |>
+  mutate(d_votes = dem1 + dem2,
+         r_votes = rep1 + rep2) |>
+  drop_na(new_district)
+
+write_csv(approach_B, "data/g24-rerun-approachB.csv")
+```
+

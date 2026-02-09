@@ -1,0 +1,167 @@
+---
+title: Gerrymandering Metrics
+format: typst
+---
+
+### 2024 Election Results and the 2024 District Map
+
+#### Aggregating Votes to the District Level
+
+```{r}
+#| message: false
+#| eval: false
+library(tidyverse)
+g24 <- read_csv("data/g24-clean.csv")
+
+g24_district_results <- g24 |>
+  group_by(CDDIST) |>
+  summarize(dem_01 = sum(CNGDEM01, na.rm = TRUE),
+            dem_02 = sum(CNGDEM02, na.rm = TRUE),
+            ind_01 = sum(CNGIND01, na.rm = TRUE),
+            rep_01 = sum(CNGREP01, na.rm = TRUE),
+            rep_02 = sum(CNGREP02, na.rm = TRUE))
+
+g24_district_results <- g24_district_results |>
+  mutate(d_votes = dem_01 + dem_02,
+         r_votes = rep_01 + rep_02,
+         d_vs_r = dem_01 > 0 & rep_01 > 0) |>
+  filter(d_vs_r)
+```
+
+We'll need to think about whether or not to include in our calculations districts that weren't dem1 vs rep1. For now we'll exclude them.
+
+
+#### Mean-Median Score
+
+We'll calculate the difference based on Republican proportions.
+
+```{r}
+#| eval: false
+g24_district_results <- g24_district_results |>
+  mutate(prop_rep = r_votes / (d_votes + r_votes))
+
+g24_district_results |>
+  summarize(mean_p = mean(prop_rep),
+            med_p = median(prop_rep)) |>
+  mutate(score = mean_p - med_p)
+```
+
+The mean-median scores is +0.0108, meaning more R districts were won in blowouts, which could be evidence of "packing" (or evidence of something else!).
+
+We can visualize the full distribution:
+
+```{r}
+#| eval: false
+g24_district_results |>
+  ggplot(aes(x = prop_rep)) +
+  geom_histogram()
+```
+
+
+#### Efficiency Gap
+
+```{r}
+#| eval: false
+n_wasted <- function(by, against) {
+  n_wasted <- rep(0, length(by))
+  w_threshold <- floor((by + against) / 2) + 1
+  # if by party wins
+  n_wasted[by > against]  <- by[by > against] - w_threshold[by > against]
+  # if by party loses
+  n_wasted[by <= against] <- by[by <= against]
+  n_wasted
+}
+
+g24_district_results |>
+  mutate(d_wasted = n_wasted(by = d_votes, against = r_votes),
+         r_wasted = n_wasted(by = r_votes, against = d_votes)) |>
+  summarize(total_d_wasted = sum(d_wasted),
+            total_r_wasted = sum(r_wasted),
+            total_d = sum(d_votes),
+            total_r = sum(r_votes)) |>
+  mutate(EG = (total_d_wasted - total_r_wasted) / (total_d + total_r))
+```
+
+The difference in wasted votes was 12.3% in favor of Democrats.
+
+### Rerun of 2024 Election Results with New Districts
+
+When you rerun the elections, you have to consider how best to handle races that were not D vs R in the 2024 map, but where those votes now fall into a district with other votes from a D vs R race. The approach used here is to simply aggregate all votes in the new district, regardless of who was on the ballot and which party they were from. The result is that races that were not considered in our metrics in 2024 because they were not D vs R races are now included.
+
+#### Approach A
+
+```{r}
+#| eval: false
+
+# number of seats won by Democrats
+approach_A <- read_csv("data/g24-rerun-approachA.csv")
+sum(approach_A$d_votes > approach_A$r_votes)
+```
+
+```{r}
+#| eval: false
+
+# mean-median score
+approach_A <- approach_A |>
+  mutate(prop_rep = r_votes / (d_votes + r_votes))
+
+approach_A |>
+  summarize(mean_p = mean(prop_rep),
+            med_p = median(prop_rep)) |>
+  mutate(score = mean_p - med_p)
+```
+
+```{r}
+#| eval: false
+
+# efficiency gap
+approach_A |>
+  mutate(d_wasted = n_wasted(by = d_votes, against = r_votes),
+         r_wasted = n_wasted(by = r_votes, against = d_votes)) |>
+  summarize(total_d_wasted = sum(d_wasted),
+            total_r_wasted = sum(r_wasted),
+            total_d = sum(d_votes),
+            total_r = sum(r_votes)) |>
+  mutate(EG = (total_d_wasted - total_r_wasted) / (total_d + total_r))
+```
+
+Democrats would have won 46 seats by this method, and the mean-median score would be -0.0266 (using proportion of R votes), and the efficiency gap would be 18.4% in favor of Democrats.
+
+#### Approach B
+
+```{r}
+#| eval: false
+
+# number of seats won by Democrats
+approach_B <- read_csv("data/g24-rerun-approachB.csv")
+sum(approach_B$d_votes > approach_B$r_votes)
+```
+
+```{r}
+#| eval: false
+
+# mean-median score
+approach_B <- approach_B |>
+  mutate(prop_rep = r_votes / (d_votes + r_votes))
+
+approach_B |>
+  summarize(mean_p = mean(prop_rep),
+            med_p = median(prop_rep)) |>
+  mutate(score = mean_p - med_p)
+```
+
+```{r}
+#| eval: false
+
+# efficiency gap
+approach_B |>
+  mutate(d_wasted = n_wasted(by = d_votes, against = r_votes),
+         r_wasted = n_wasted(by = r_votes, against = d_votes)) |>
+  summarize(total_d_wasted = sum(d_wasted),
+            total_r_wasted = sum(r_wasted),
+            total_d = sum(d_votes),
+            total_r = sum(r_votes)) |>
+  mutate(EG = (total_d_wasted - total_r_wasted) / (total_d + total_r))
+```
+
+Democrats would have won 46 seats by this method, and the mean-median score would be -0.0281 (using proportion of R votes), and the efficiency gap would be 17.9% in favor of Democrats.
